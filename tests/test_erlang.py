@@ -107,6 +107,35 @@ def main():
     check(f"required_agents={n_req} meets target (SL={sl_at:.4f} >= 0.80)", sl_at >= 0.80)
     check(f"one fewer agent fails target (SL={sl_below:.4f} < 0.80)", sl_below < 0.80)
 
+    print("\nmax-occupancy cap (matches the public Erlang calculator):")
+    # 240 calls, 240s AHT, 30-min interval => 32 Erlangs. Pure SL answer is 37
+    # (occupancy 86.5%); an 85% cap must raise it to 38 (occupancy 84.2%).
+    a32 = erlang.traffic_intensity(240, 240, 30 * 60)
+    check("offered load is 32 Erlangs", approx(a32, 32.0))
+    n_pure = erlang.required_agents(a32, 0.80, 20, 240)
+    check(f"pure Erlang-C answer is 37 (got {n_pure})", n_pure == 37)
+    check("pure answer occupancy exceeds 85%", erlang.occupancy(37, a32) > 0.85)
+    n_capped = erlang.required_agents(a32, 0.80, 20, 240, max_occupancy=0.85)
+    check(f"85% occupancy cap raises answer to 38 (got {n_capped})", n_capped == 38)
+    check("capped answer occupancy is at or below 85%",
+          erlang.occupancy(n_capped, a32) <= 0.85)
+    # The capped staffing reproduces the public calculator's figures.
+    check("capped SL ~ 86.4%", approx(erlang.service_level(38, a32, 20, 240), 0.864, tol=2e-3))
+    check("capped occupancy ~ 84.2%", approx(erlang.occupancy(38, a32), 0.842, tol=2e-3))
+    check("capped ASA ~ 8.9s", approx(erlang.asa(38, a32, 240), 8.9, tol=0.1))
+    check("max_occupancy=1.0 leaves the pure answer unchanged",
+          erlang.required_agents(a32, 0.80, 20, 240, max_occupancy=1.0) == 37)
+
+    print("\nshrinkage (scheduled headcount):")
+    check("38 on phone at 30% shrinkage => ~54.3 scheduled",
+          approx(erlang.scheduled_headcount(38, 0.30), 38 / 0.7, tol=1e-9))
+    check("0% shrinkage is a no-op", approx(erlang.scheduled_headcount(38, 0.0), 38.0))
+    try:
+        erlang.scheduled_headcount(10, 1.0)
+        check("shrinkage=1.0 rejected", False)
+    except ValueError:
+        check("shrinkage=1.0 rejected", True)
+
     print("\nEdge cases:")
     check("A=0 => erlang_c 0", approx(erlang.erlang_c(5, 0), 0.0))
     check("A=0 => service_level 1.0", approx(erlang.service_level(5, 0, 20, 180), 1.0))

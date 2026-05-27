@@ -11,6 +11,8 @@ Reference: Erlang-C is the standard M/M/N queueing model used in workforce
 management for inbound call staffing.
 """
 
+from __future__ import annotations
+
 import math
 
 
@@ -113,22 +115,56 @@ def required_agents(
     target_seconds: float,
     aht_seconds: float,
     max_agents: int = 1000,
+    max_occupancy: float | None = None,
 ) -> int:
-    """Minimum agents needed so service_level >= target_sl.
+    """Minimum on-phone agents so service_level >= target_sl.
 
     Search starts just above the offered load (floor(a) + 1), since any
     staffing at or below the load yields an unstable queue (rho >= 1).
     Returns at least 1 even when there is no load.
+
+    If max_occupancy is given (e.g. 0.85), the result is also raised until
+    occupancy (a/n) sits at or below that ceiling. Real WFM teams cap
+    occupancy well under 100% because agents running flat-out burn out and
+    handle times degrade; the standard ceiling is around 85%. Adding agents
+    for this reason also pushes the achieved service level above target.
     """
     if not 0.0 <= target_sl <= 1.0:
         raise ValueError("target_sl must be between 0 and 1")
+    if max_occupancy is not None and not 0.0 < max_occupancy <= 1.0:
+        raise ValueError("max_occupancy must be in (0, 1]")
     if a == 0:
         return 1
     start = int(math.floor(a)) + 1
     for n in range(max(1, start), max_agents + 1):
         if service_level(n, a, target_seconds, aht_seconds) >= target_sl:
+            # Service-level target met; now enforce the occupancy ceiling.
+            if max_occupancy is not None:
+                while occupancy(n, a) > max_occupancy and n < max_agents:
+                    n += 1
             return n
     raise RuntimeError(
         f"Could not meet target service level {target_sl} with up to "
         f"{max_agents} agents for load {a:.2f} Erlangs"
     )
+
+
+def scheduled_headcount(on_phone_agents: float, shrinkage: float) -> float:
+    """Scheduled headcount needed to keep on_phone_agents actually on the phone.
+
+    Erlang-C tells you how many agents must be on the phone in an interval, but
+    agents are not on the phone 100% of paid time: breaks, lunches, training,
+    meetings, coaching, sick time, and unplanned aux all subtract. That lost
+    fraction is "shrinkage". To net the required on-phone count after shrinkage,
+    schedule more bodies:
+
+        scheduled = on_phone / (1 - shrinkage)
+
+    shrinkage is a fraction in [0, 1); 0.30 (30%) is a common planning value.
+    Returns a float (fractional people); round up when turning it into a roster.
+    """
+    if not 0.0 <= shrinkage < 1.0:
+        raise ValueError("shrinkage must be in [0, 1)")
+    if on_phone_agents < 0:
+        raise ValueError("on_phone_agents must be >= 0")
+    return on_phone_agents / (1.0 - shrinkage)

@@ -12,12 +12,16 @@ math up rather than treating a commercial tool as a black box.
 
 - Computes offered load, required agents, service level, occupancy, and average
   speed of answer (ASA) for any interval of call data.
+- Applies the two real-world planning levers WFM teams add on top of raw
+  Erlang-C: a **max-occupancy cap** and a **shrinkage** uplift to scheduled
+  headcount (see below).
 - Produces a full-day staffing plan from interval-level call data.
 - Exports an interactive `.xlsx` where the Erlang-C model lives as Excel
   formulas: change the inputs, and the recommended staffing and charts
   recalculate instantly.
 - Ships with a validated engine (recursive Erlang-B/C cross-checked against an
-  independent direct-formula implementation).
+  independent direct-formula implementation), and reconciles to the decimal with
+  the public Call Centre Helper Erlang calculator.
 
 ## WFM concepts (the math)
 
@@ -36,6 +40,12 @@ math up rather than treating a commercial tool as a black box.
 
 The core trade-off this tool makes visible: adding agents raises service level but lowers occupancy. Staffing is choosing the right point on that curve.
 
+**Max-occupancy cap:** raw Erlang-C will happily run agents at 90%+ occupancy, which burns people out and degrades handle time. WFM teams cap occupancy (commonly ~85%) and add agents until the cap is respected. That uplift is *why* the achieved service level often sits above the stated target.
+
+**Shrinkage:** Erlang-C gives agents that must be *on the phone*; people are not on the phone 100% of paid time (breaks, lunch, training, meetings, sick time, unplanned aux). Shrinkage is that lost fraction, and scheduled headcount is `on-phone / (1 - shrinkage)`. At 30% shrinkage, 38 on-phone agents means ~54 scheduled.
+
+Erlang-C itself assumes callers never abandon (no hang-ups while queued); modeling abandonment is the job of **Erlang-A**, the natural extension of this engine.
+
 ## Install
 
 ```bash
@@ -50,11 +60,14 @@ Requires Python 3.8+.
 # 1. Generate a realistic day of synthetic interval data
 python3 data/generate_synthetic.py
 
-# 2. Build a staffing plan (defaults: 80% SL within 20s, 30-min intervals)
+# 2. Build a staffing plan
+#    defaults: 80% SL within 20s, 30-min intervals, 85% max occupancy, 30% shrinkage
 python3 staffing.py --data data/sample_intervals.csv
 
-# tune the target:
+# tune the target and the planning levers:
 python3 staffing.py --data data/sample_intervals.csv --sl 0.90 --target-sec 30
+python3 staffing.py --data data/sample_intervals.csv --shrinkage 0.35 --max-occupancy 0.90
+python3 staffing.py --data data/sample_intervals.csv --max-occupancy 1.0  # disable the cap
 
 # 3. Build the interactive Excel workbook
 python3 excel_export.py
@@ -65,19 +78,30 @@ python3 excel_export.py
 
 `output/staffing_model.xlsx` is the model as live Excel formulas. Open it and
 edit the highlighted input cells (calls per interval, average handle time,
-target service level, answer-within time). The **recommended agent count**,
-service level, occupancy, ASA, and both charts recalculate automatically. It is
-meant to be usable by anyone, no Python needed.
+target service level, answer-within time, max occupancy, shrinkage). The
+**recommended on-phone agents**, service level, occupancy, ASA, **scheduled
+headcount**, and both charts recalculate automatically. It is meant to be usable
+by anyone, no Python needed.
 
 ## Sample output
 
 ```
-Interval  Calls   AHT  Load(E)  Agents      SL    Occ  ASA(s)
-   14:00    245   227    30.90      36   82.0%    86%    12.5
-   15:00    229   248    31.55      37   83.3%    85%    11.8
+Interval  Calls   AHT  Load(E)  OnPhone      SL    Occ  ASA(s)   Sched
+   14:00    245   227    30.90       37   87.7%    84%     7.8    52.9
+   15:00    229   248    31.55       38   88.5%    83%     7.4    54.3
    ...
-Peak staffing: 37 agents at 15:00 (229 calls, 31.6 Erlangs)
+OnPhone = agents required on the phone (85% max-occupancy cap applied).
+Sched   = scheduled headcount after 30% shrinkage (OnPhone / (1 - shrinkage)).
+Peak staffing: 38 on phone at 15:00 (229 calls, 31.6 Erlangs)
 ```
+
+### Reconciliation with the industry calculator
+
+For 240 calls, 240s AHT, a 30-min interval, an 80%/20s target, an 85% occupancy
+cap, and 30% shrinkage, this toolkit returns **38 on-phone agents** (86.4%
+service level, 84.2% occupancy, 8.9s ASA) and **~54 scheduled**, matching the
+public [Call Centre Helper Erlang calculator](https://www.callcentrehelper.com/tools/erlang-calculator/)
+to the decimal.
 
 ## Data
 

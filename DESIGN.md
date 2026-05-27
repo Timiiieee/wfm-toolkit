@@ -31,6 +31,11 @@ Traffic intensity in Erlangs: `A = (calls_per_interval * AHT_seconds) / interval
 - **Average speed of answer** (seconds): `ASA = C(N, A) * AHT / (N - A)`
 - **Occupancy**: `rho = A / N`
 
+Two planning levers WFM teams layer on top of raw Erlang-C:
+
+- **Max-occupancy cap**: after the service-level target is met, raise N until `A/N <= max_occupancy` (commonly 0.85). Prevents the model recommending agents at burnout-level occupancy; also pushes achieved SL above target.
+- **Shrinkage**: Erlang-C yields *on-phone* agents. Scheduled headcount nets up for paid-but-off-phone time: `scheduled = on_phone / (1 - shrinkage)`.
+
 ## Function signatures (`erlang.py`)
 
 ```
@@ -40,7 +45,9 @@ erlang_c(n: int, a: float) -> float          # returns 1.0 when rho >= 1 (always
 service_level(n, a, target_seconds, aht_seconds) -> float   # 0.0..1.0
 occupancy(n: int, a: float) -> float
 asa(n, a, aht_seconds) -> float              # float('inf') when rho >= 1
-required_agents(a, target_sl, target_seconds, aht_seconds, max_agents=1000) -> int
+required_agents(a, target_sl, target_seconds, aht_seconds, max_agents=1000,
+                max_occupancy=None) -> int   # raises N to honor occupancy cap if given
+scheduled_headcount(on_phone_agents: float, shrinkage: float) -> float
 ```
 
 ## Edge cases (must handle)
@@ -59,9 +66,10 @@ required_agents(a, target_sl, target_seconds, aht_seconds, max_agents=1000) -> i
 
 ## Interactive Excel design (`output/staffing_model.xlsx`)
 
-- **Inputs** (editable, named cells): calls/interval, AHT sec, interval min, target SL %, target answer sec.
+- **Inputs** (editable cells): calls/interval, AHT sec, interval min, target SL %, target answer sec, max occupancy %, shrinkage %.
 - **Staffing table**: agent counts down rows; Erlang-B computed iteratively row-over-row via live formulas; then Erlang-C, SL, occupancy per row.
-- **Recommended Agents** = `INDEX/MATCH` for the first row where SL >= target.
+- **Recommended on-phone agents** = `MAX(MINIFS(...SL>=target...), CEILING(load/max_occupancy))` so the result honors both the service-level target and the occupancy cap.
+- **Scheduled headcount** = `recommended / (1 - shrinkage)`.
 - **Charts**: SL-vs-agents line; occupancy-vs-agents line (openpyxl native).
 - Changing any input recalculates everything (this is the non-technical interface + the JD "Advanced Excel" evidence).
 

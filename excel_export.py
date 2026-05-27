@@ -2,15 +2,17 @@
 
 The workbook implements the full Erlang-C model as LIVE Excel formulas, so a
 non-technical user can open it, change the input cells (call volume, AHT,
-target service level, ...), and watch the recommended agent count, service
-level, occupancy, and the charts recalculate instantly. No Python needed to
-use it.
+target service level, max occupancy, shrinkage), and watch the recommended
+agent count, service level, occupancy, ASA, scheduled headcount, and the charts
+recalculate instantly. No Python needed to use it.
 
 Layout:
-  - Inputs block (editable, highlighted)
+  - Inputs block (editable, highlighted): demand + service target + the two
+    real-world planning levers (max-occupancy cap, shrinkage)
   - Derived values (interval seconds, offered load in Erlangs)
-  - Result block (recommended agents + resulting SL/occupancy/ASA)
-  - Staffing table: Erlang-B (iterative), occupancy, Erlang-C, SL, ASA per agent count
+  - Result block (recommended on-phone agents, resulting SL/occupancy/ASA, and
+    scheduled headcount after shrinkage)
+  - Staffing table: Erlang-B (iterative), occupancy, Erlang-C, SL, ASA per agent
   - Two line charts: service level vs agents, occupancy vs agents
 
 Usage:
@@ -33,6 +35,8 @@ DEFAULT_AHT = 240
 DEFAULT_INTERVAL_MIN = 30
 DEFAULT_TARGET_SL = 0.80
 DEFAULT_TARGET_SEC = 20
+DEFAULT_MAX_OCCUPANCY = 0.85   # standard WFM occupancy ceiling
+DEFAULT_SHRINKAGE = 0.30       # standard planning shrinkage
 
 # Styles
 TITLE_FONT = Font(size=14, bold=True)
@@ -67,6 +71,8 @@ def build(path: str) -> None:
         ("Interval length (min)", DEFAULT_INTERVAL_MIN, "0"),
         ("Target service level", DEFAULT_TARGET_SL, "0%"),
         ("Answer within (sec)", DEFAULT_TARGET_SEC, "0"),
+        ("Max occupancy (1 = no cap)", DEFAULT_MAX_OCCUPANCY, "0%"),
+        ("Shrinkage", DEFAULT_SHRINKAGE, "0%"),
     ]
     row = 5
     for label, value, fmt in inputs:
@@ -77,20 +83,26 @@ def build(path: str) -> None:
         c.number_format = fmt
         row += 1
     # Named references for readability
-    CALLS, AHT, INTERVAL_MIN, TARGET_SL, TARGET_SEC = "B5", "B6", "B7", "B8", "B9"
+    CALLS, AHT, INTERVAL_MIN = "$B$5", "$B$6", "$B$7"
+    TARGET_SL, TARGET_SEC = "$B$8", "$B$9"
+    MAXOCC, SHRINK = "$B$10", "$B$11"
+    # Safe forms: max occupancy collapses to 1 (no cap) if blank/invalid;
+    # shrinkage collapses to 0 if blank/invalid.
+    MAXOCC_SAFE = f"IF(OR({MAXOCC}<=0,{MAXOCC}>1),1,{MAXOCC})"
+    SHRINK_SAFE = f"IF(OR({SHRINK}<0,{SHRINK}>=1),0,{SHRINK})"
 
     # --- Derived ---
-    ws["A11"] = "DERIVED"
-    ws["A11"].font = HEAD_FONT
-    ws["A12"] = "Interval length (sec)"
-    ws["B12"] = f"={INTERVAL_MIN}*60"
-    ws["A13"] = "Offered load (Erlangs)"
-    ws["B13"] = f"={CALLS}*{AHT}/B12"
-    ws["B13"].number_format = "0.00"
-    LOAD = "B13"
+    ws["A13"] = "DERIVED"
+    ws["A13"].font = HEAD_FONT
+    ws["A14"] = "Interval length (sec)"
+    ws["B14"] = f"={INTERVAL_MIN}*60"
+    ws["A15"] = "Offered load (Erlangs)"
+    ws["B15"] = f"={CALLS}*{AHT}/B14"
+    ws["B15"].number_format = "0.00"
+    LOAD = "$B$15"
 
     # --- Staffing table ---
-    tbl_head = 16
+    tbl_head = 17
     headers = ["Agents (n)", "Erlang-B", "Occupancy", "Erlang-C P(wait)",
                "Service level", "ASA (sec)"]
     for j, h in enumerate(headers, start=1):
@@ -143,18 +155,25 @@ def build(path: str) -> None:
 
     ws["D4"] = "RESULT"
     ws["D4"].font = HEAD_FONT
-    # MINIFS returns 0 if no staffing within the table meets the target; surface
-    # a readable message instead of letting the downstream lookups show #N/A.
+    # Minimum agents meeting the service-level target. MINIFS returns 0 if no
+    # row in the table clears the target.
     minifs = f"MINIFS({n_range},{sl_range},\">=\"&{TARGET_SL})"
+    # Floor implied by the occupancy cap: n must be >= load / max_occupancy.
+    occ_floor = f"CEILING({LOAD}/({MAXOCC_SAFE}),1)"
+    # Recommended on-phone agents = the larger of the SL-driven count and the
+    # occupancy-cap floor. Readable message instead of #N/A if infeasible.
+    recommended = (f"=IF({minifs}=0,\"raise agent cap / lower target\","
+                   f"MAX({minifs},{occ_floor}))")
     results = [
-        ("Recommended agents",
-         f"=IF({minifs}=0,\"raise agent cap / lower target\",{minifs})", "0"),
+        ("Recommended agents (on phone)", recommended, "0"),
         ("Service level achieved",
-         f"=IFERROR(INDEX({sl_range},MATCH(E5,{n_range},0)),\"n/a\")", "0.0%"),
+         f"=IFERROR(INDEX({sl_range},MATCH($E$5,{n_range},0)),\"n/a\")", "0.0%"),
         ("Occupancy at that staffing",
-         f"=IFERROR(INDEX({occ_range},MATCH(E5,{n_range},0)),\"n/a\")", "0%"),
+         f"=IFERROR(INDEX({occ_range},MATCH($E$5,{n_range},0)),\"n/a\")", "0%"),
         ("ASA at that staffing (sec)",
-         f"=IFERROR(INDEX({asa_range},MATCH(E5,{n_range},0)),\"n/a\")", "0.0"),
+         f"=IFERROR(INDEX({asa_range},MATCH($E$5,{n_range},0)),\"n/a\")", "0.0"),
+        ("Scheduled headcount (after shrinkage)",
+         f"=IF(ISNUMBER($E$5),$E$5/(1-({SHRINK_SAFE})),\"n/a\")", "0.0"),
     ]
     rr = 5
     for label, formula, fmt in results:
@@ -195,7 +214,7 @@ def build(path: str) -> None:
     ws.add_chart(occ_chart, "H20")
 
     # Column widths
-    widths = {"A": 24, "B": 12, "C": 12, "D": 22, "E": 16, "F": 11}
+    widths = {"A": 26, "B": 12, "C": 12, "D": 30, "E": 16, "F": 11}
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
